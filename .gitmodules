@@ -1,0 +1,6 @@
+[submodule "tools/APKTool-Analyzer"]
+	path = tools/APKTool-Analyzer
+	url = https://github.com/APKTraceProject/APKTool-Analyzer.git
+[submodule "tools/JADX-Analyzer"]
+	path = tools/JADX-Analyzer
+	url = https://github.com/APKTraceProject/JADX-Analyzer.git
