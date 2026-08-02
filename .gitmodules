@@ -4,3 +4,6 @@
 [submodule "tools/JADX-Analyzer"]
 	path = tools/JADX-Analyzer
 	url = https://github.com/APKTraceProject/JADX-Analyzer.git
+[submodule "tools/Native-Analyzer"]
+	path = tools/Native-Analyzer
+	url = https://github.com/APKTraceProject/Native-Analyzer.git
