@@ -1,0 +1,13 @@
+{
+    "paths": {
+        "output_dir": "C:/Users/AR/Desktop/APKTrace map/APKTrace/outputs",
+        "apktool_path": "C:/Users/AR/Desktop/APKTrace map/tools/apk tool/apktool.bat",
+        "jadx_path": "C:/Users/AR/Desktop/APKTrace map/tools/jadx-1.5.6/bin/jadx.bat",
+        "ghidra_path": "C:/Users/AR/Desktop/APKTrace map/tools/ghidra_11.3.1_PUBLIC_20250219/ghidra_11.3.1_PUBLIC/support/analyzeHeadless.bat"
+    },
+    "api": {
+        "provider": "",
+        "api_key": "",
+        "model": ""
+    }
+}

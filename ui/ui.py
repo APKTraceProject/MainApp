@@ -1,21 +1,10 @@
-import sys
 import platform
 import threading
-import json
 from pathlib import Path
+from typing import Any, Callable, Dict, Optional
+
 import tkinter.filedialog as filedialog
 import customtkinter as ctk
-
-# Ensure apktool-analyzer module can be imported cleanly regardless of directory structure
-CURRENT_DIR = Path(__file__).resolve().parent
-APKTOOL_ANALYZER_DIR = CURRENT_DIR / "apktool-analyzer"
-if str(APKTOOL_ANALYZER_DIR) not in sys.path:
-    sys.path.append(str(APKTOOL_ANALYZER_DIR))
-
-try:
-    import apktool_analyzer
-except ImportError:
-    apktool_analyzer = None
 
 # Set general appearance and theme
 ctk.set_appearance_mode("dark")
@@ -223,8 +212,23 @@ class ClickableRow(ctk.CTkFrame):
 
 
 class AndroidAnalyzerApp(ctk.CTk):
-    def __init__(self):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        run_manifest_analysis: Optional[Callable] = None,
+        run_java_analysis: Optional[Callable] = None,
+        run_native_analysis: Optional[Callable] = None,
+        save_config: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
         super().__init__()
+
+        # Config + analysis/save callables are injected from main.py, which owns
+        # all business logic (config file, path validation, running the tools).
+        self.config: Dict[str, Any] = config or {"paths": {}, "api": {}}
+        self.run_manifest_analysis_fn = run_manifest_analysis
+        self.run_java_analysis_fn = run_java_analysis
+        self.run_native_analysis_fn = run_native_analysis
+        self.save_config_fn = save_config
 
         self.title("Android Analyzer AI - APKTrace")
         self.geometry("1250x800")
@@ -234,6 +238,9 @@ class AndroidAnalyzerApp(ctk.CTk):
         self.nav_btns = {}
         self.scan_mode_btns = {}
         self.dashboard_cards = {}
+        self.manifest_widgets = {}
+        self.settings_path_entries = {}
+        self.settings_api_entries = {}
 
         self.current_scan_mode = "Manifest"
         self.loaded_apk_path = None
@@ -268,7 +275,7 @@ class AndroidAnalyzerApp(ctk.CTk):
 
         self.create_nav_btn(self.sidebar, "🏠", "Dashboard", "Dashboard")
         self.create_nav_btn(self.sidebar, "💬", "AI Assistant", "AI Assistant")
-        self.create_nav_btn(self.sidebar, "⚙️", "API Settings", "API Settings")
+        self.create_nav_btn(self.sidebar, "⚙️", "Settings", "Settings")
 
         # SCAN MODES Category
         ctk.CTkLabel(self.sidebar, text="SCAN MODES", text_color=COLOR_TEXT_MUTED, font=("Arial", 12, "bold")).pack(anchor="w", padx=25, pady=(20, 8))
@@ -315,10 +322,13 @@ class AndroidAnalyzerApp(ctk.CTk):
 
         self.pages["Dashboard"] = self.build_dashboard()
         self.pages["AI Assistant"] = self.build_chat_page()
-        self.pages["API Settings"] = self.build_placeholder_page("API Settings")
+        self.pages["Settings"] = self.build_settings_page()
 
-        # Initial Empty State for Scan Mode Pages
-        self.pages["Manifest"] = self.build_empty_manifest_page()
+        # Manifest page is built ONCE as an empty skeleton and updated in place
+        # whenever an analysis finishes (see update_manifest_page). It is never
+        # torn down and rebuilt, so it stays visible - just empty - even if no
+        # scan has run yet.
+        self.pages["Manifest"] = self.build_manifest_page()
         self.pages["Java / Kotlin"] = self.build_placeholder_page("Java / Kotlin Analysis Results")
         self.pages["Native Libraries"] = self.build_placeholder_page("Native Libraries Analysis Results")
         self.pages["Strings"] = self.build_placeholder_page("Strings & Secrets Results")
@@ -562,16 +572,17 @@ class AndroidAnalyzerApp(ctk.CTk):
 
     def _run_manifest_analysis_thread(self):
         try:
-            if apktool_analyzer and hasattr(apktool_analyzer, "run_analysis_pipeline"):
-                report = apktool_analyzer.run_analysis_pipeline(
-                    apk_path_str=self.loaded_apk_path,
-                    status_callback=self._update_progress_callback
+            if self.run_manifest_analysis_fn is None:
+                raise RuntimeError(
+                    "Manifest analysis is not connected. Launch APKTrace via main.py so the "
+                    "analyzer tools and config get wired in."
                 )
-            else:
-                # Fallback mock delay if module isn't loaded
-                import time
-                time.sleep(2)
-                report = {}
+
+            report = self.run_manifest_analysis_fn(
+                apk_path_str=self.loaded_apk_path,
+                config=self.config,
+                status_callback=self._update_progress_callback,
+            )
 
             self.after(0, lambda: self._on_analysis_finished(report, None))
         except Exception as e:
@@ -588,7 +599,7 @@ class AndroidAnalyzerApp(ctk.CTk):
 
         self.analysis_results = report
         self.update_dashboard_cards(report)
-        self.populate_manifest_page(report)
+        self.update_manifest_page(report)
 
         # Switch to Manifest tab upon completion
         self.show_page("Manifest")
@@ -601,7 +612,7 @@ class AndroidAnalyzerApp(ctk.CTk):
         # Calculate basic risk level
         perm_count = len(manifest.get("permissions", []))
         is_debuggable = sec_flags.get("debuggable", False)
-        
+
         if is_debuggable or perm_count > 25:
             risk = ("HIGH", COLOR_DANGER)
         elif perm_count > 10:
@@ -626,55 +637,25 @@ class AndroidAnalyzerApp(ctk.CTk):
                     val_lbl.configure(text_color=risk[1])
                 sub_lbl.configure(text=sub)
 
-    def build_empty_manifest_page(self):
+    # ------------------------------------------------------------------ #
+    # Manifest page: built ONCE (empty), then only its widgets are updated
+    # ------------------------------------------------------------------ #
+    def build_manifest_page(self):
+        """Build the Manifest Analysis tab's full layout, empty from the start.
+
+        All the cards/sections a completed scan would fill in are already
+        present here (just showing placeholder values). update_manifest_page()
+        later fills in the same widgets in place - the page itself is never
+        rebuilt, so nothing "appears" only after clicking Analyze.
+        """
         page = ctk.CTkFrame(self.main_container, fg_color="transparent")
         page.grid_columnconfigure(0, weight=1)
         page.grid_rowconfigure(1, weight=1)
 
-        header_frame = ctk.CTkFrame(page, fg_color="transparent")
-        header_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=(30, 15))
-        ctk.CTkLabel(header_frame, text="📄 Manifest Analysis Results", font=("Arial", 26, "bold"), text_color=COLOR_ACCENT_TEXT).pack(side="left")
-
-        back_btn = ctk.CTkButton(
-            header_frame,
-            text="← Back to Dashboard",
-            width=160,
-            height=35,
-            fg_color=COLOR_SURFACE_HOVER,
-            hover_color="#3D3E4A",
-            command=lambda: self.show_page("Dashboard"),
-        )
-        back_btn.pack(side="right")
-
-        content_box = ctk.CTkFrame(page, fg_color=COLOR_SURFACE, corner_radius=12, border_width=1, border_color=COLOR_BORDER)
-        content_box.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 30))
-
-        ctk.CTkLabel(
-            content_box,
-            text="No data yet — select an APK on Dashboard and run 'Manifest' analysis.",
-            font=("Arial", 15),
-            text_color=COLOR_TEXT_MUTED,
-        ).pack(expand=True)
-
-        return page
-
-    def populate_manifest_page(self, report: dict):
-        """Populate the Manifest Analysis page with extracted findings"""
-        page = ctk.CTkFrame(self.main_container, fg_color="transparent")
-        page.grid_columnconfigure(0, weight=1)
-        page.grid_rowconfigure(1, weight=1)
-
-        manifest = report.get("manifest", {})
-        app_info = manifest.get("application", {})
-        sdk_info = manifest.get("sdk", {})
-        sec_flags = manifest.get("security_flags", {})
-
-        # Header Frame
+        # Header
         header = ctk.CTkFrame(page, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
-        
         ctk.CTkLabel(header, text="📄 Manifest Analysis", font=("Arial", 24, "bold"), text_color=COLOR_ACCENT_TEXT).pack(side="left")
-
         ctk.CTkButton(
             header,
             text="← Back to Dashboard",
@@ -689,6 +670,8 @@ class AndroidAnalyzerApp(ctk.CTk):
         body = ctk.CTkScrollableFrame(page, fg_color="transparent")
         body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 20))
 
+        self.manifest_widgets = {}
+
         # 1. Package & App Overview Section
         info_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
         info_card.pack(fill="x", pady=(0, 15), padx=5)
@@ -698,22 +681,24 @@ class AndroidAnalyzerApp(ctk.CTk):
         grid_frame = ctk.CTkFrame(info_card, fg_color="transparent")
         grid_frame.pack(fill="x", padx=20, pady=(0, 15))
 
-        metadata = [
-            ("Package Name:", manifest.get("package_name", "N/A")),
-            ("Version Name:", manifest.get("version_name", "N/A")),
-            ("Version Code:", str(manifest.get("version_code", "N/A"))),
-            ("Min SDK:", str(sdk_info.get("min_sdk", "N/A"))),
-            ("Target SDK:", str(sdk_info.get("target_sdk", "N/A"))),
-            ("Shared User ID:", str(manifest.get("shared_user_id") or "None")),
+        metadata_labels = [
+            "Package Name:",
+            "Version Name:",
+            "Version Code:",
+            "Min SDK:",
+            "Target SDK:",
+            "Shared User ID:",
         ]
 
-        for i, (label, val) in enumerate(metadata):
+        self.manifest_widgets["metadata"] = {}
+        for i, label in enumerate(metadata_labels):
             r, c = divmod(i, 2)
             lbl_widget = ctk.CTkLabel(grid_frame, text=f"{label} ", font=("Arial", 13, "bold"), text_color=COLOR_TEXT_MUTED)
-            lbl_widget.grid(row=r, column=c*2, sticky="w", pady=4, padx=(0, 5))
-            
-            val_widget = ctk.CTkLabel(grid_frame, text=val, font=("Arial", 13), text_color=COLOR_TEXT)
-            val_widget.grid(row=r, column=c*2+1, sticky="w", pady=4, padx=(0, 30))
+            lbl_widget.grid(row=r, column=c * 2, sticky="w", pady=4, padx=(0, 5))
+
+            val_widget = ctk.CTkLabel(grid_frame, text="—", font=("Arial", 13), text_color=COLOR_TEXT)
+            val_widget.grid(row=r, column=c * 2 + 1, sticky="w", pady=4, padx=(0, 30))
+            self.manifest_widgets["metadata"][label] = val_widget
 
         # 2. Security Flags Section
         flags_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
@@ -724,60 +709,123 @@ class AndroidAnalyzerApp(ctk.CTk):
         flags_grid = ctk.CTkFrame(flags_card, fg_color="transparent")
         flags_grid.pack(fill="x", padx=20, pady=(0, 15))
 
-        flags_list = [
-            ("Debuggable", sec_flags.get("debuggable"), "High Risk: Code can be attached to a debugger"),
-            ("Allow Backup", sec_flags.get("allow_backup"), "Medium Risk: Application data can be extracted via ADB"),
-            ("Cleartext Traffic", sec_flags.get("uses_cleartext_traffic"), "HTTP unencrypted traffic permitted"),
-            ("Test Only", sec_flags.get("test_only"), "Test mode flag enabled"),
+        flags_defs = [
+            ("Debuggable", "High Risk: Code can be attached to a debugger"),
+            ("Allow Backup", "Medium Risk: Application data can be extracted via ADB"),
+            ("Cleartext Traffic", "HTTP unencrypted traffic permitted"),
+            ("Test Only", "Test mode flag enabled"),
         ]
 
-        for i, (flag_name, flag_val, flag_desc) in enumerate(flags_list):
-            is_bad = flag_val is True and flag_name in ["Debuggable", "Allow Backup", "Cleartext Traffic"]
-            badge_color = COLOR_DANGER if is_bad else COLOR_SURFACE_HOVER
-            badge_text = "TRUE" if flag_val else ("FALSE" if flag_val is False else "UNSPECIFIED")
-
+        self.manifest_widgets["flags"] = {}
+        for i, (flag_name, flag_desc) in enumerate(flags_defs):
             f_lbl = ctk.CTkLabel(flags_grid, text=flag_name, font=("Arial", 13, "bold"), text_color=COLOR_TEXT)
             f_lbl.grid(row=i, column=0, sticky="w", pady=6)
 
-            badge = ctk.CTkLabel(flags_grid, text=f" {badge_text} ", font=("Arial", 11, "bold"), fg_color=badge_color, corner_radius=4)
+            badge = ctk.CTkLabel(flags_grid, text=" UNSPECIFIED ", font=("Arial", 11, "bold"), fg_color=COLOR_SURFACE_HOVER, corner_radius=4)
             badge.grid(row=i, column=1, sticky="w", padx=15, pady=6)
 
             d_lbl = ctk.CTkLabel(flags_grid, text=flag_desc, font=("Arial", 12), text_color=COLOR_TEXT_MUTED)
             d_lbl.grid(row=i, column=2, sticky="w", pady=6)
 
+            self.manifest_widgets["flags"][flag_name] = badge
+
         # 3. Permissions Section
         perms_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
         perms_card.pack(fill="x", pady=(0, 15), padx=5)
 
-        perms = manifest.get("permissions", [])
-        ctk.CTkLabel(perms_card, text=f"DECLARED PERMISSIONS ({len(perms)})", font=("Arial", 12, "bold"), text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=20, pady=(15, 10))
+        perms_title_lbl = ctk.CTkLabel(perms_card, text="DECLARED PERMISSIONS (0)", font=("Arial", 12, "bold"), text_color=COLOR_TEXT_MUTED)
+        perms_title_lbl.pack(anchor="w", padx=20, pady=(15, 10))
 
-        if perms:
-            perms_box = ctk.CTkTextbox(perms_card, height=130, fg_color=COLOR_BG, font=("Consolas", 12), text_color=COLOR_ACCENT_TEXT)
-            perms_box.pack(fill="x", padx=20, pady=(0, 15))
-            for p in perms:
-                perms_box.insert("end", f"• {p.get('name')}\n")
-            perms_box.configure(state="disabled")
-        else:
-            ctk.CTkLabel(perms_card, text="No permissions declared.", font=("Arial", 12), text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=20, pady=(0, 15))
+        perms_box = ctk.CTkTextbox(perms_card, height=130, fg_color=COLOR_BG, font=("Consolas", 12), text_color=COLOR_ACCENT_TEXT)
+        perms_box.pack(fill="x", padx=20, pady=(0, 15))
+        perms_box.insert("end", "No data yet — select an APK on Dashboard and run 'Manifest' analysis.")
+        perms_box.configure(state="disabled")
+
+        self.manifest_widgets["perms_title"] = perms_title_lbl
+        self.manifest_widgets["perms_box"] = perms_box
 
         # 4. Components Section
         comps_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
         comps_card.pack(fill="x", pady=(0, 15), padx=5)
 
-        comps = manifest.get("components", {})
         ctk.CTkLabel(comps_card, text="MANIFEST COMPONENTS", font=("Arial", 12, "bold"), text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=20, pady=(15, 10))
 
         tabview = ctk.CTkTabview(comps_card, fg_color=COLOR_BG)
         tabview.pack(fill="x", padx=20, pady=(0, 15))
 
+        self.manifest_widgets["comp_boxes"] = {}
         for c_type in ["activities", "services", "receivers", "providers"]:
             tab = tabview.add(c_type.capitalize())
-            c_list = comps.get(c_type, [])
-            
+
             box = ctk.CTkTextbox(tab, height=150, fg_color="transparent", font=("Consolas", 12), text_color=COLOR_TEXT)
             box.pack(fill="both", expand=True)
-            
+            box.insert("end", "No data yet.")
+            box.configure(state="disabled")
+
+            self.manifest_widgets["comp_boxes"][c_type] = box
+
+        return page
+
+    def update_manifest_page(self, report: dict):
+        """Fill in the already-built Manifest page with results from a completed scan."""
+        widgets = self.manifest_widgets
+        if not widgets:
+            return
+
+        manifest = report.get("manifest", {})
+        sdk_info = manifest.get("sdk", {})
+        sec_flags = manifest.get("security_flags", {})
+
+        # 1. Metadata
+        metadata_values = {
+            "Package Name:": manifest.get("package_name", "N/A"),
+            "Version Name:": manifest.get("version_name", "N/A"),
+            "Version Code:": str(manifest.get("version_code", "N/A")),
+            "Min SDK:": str(sdk_info.get("min_sdk", "N/A")),
+            "Target SDK:": str(sdk_info.get("target_sdk", "N/A")),
+            "Shared User ID:": str(manifest.get("shared_user_id") or "None"),
+        }
+        for label, val in metadata_values.items():
+            widget = widgets["metadata"].get(label)
+            if widget:
+                widget.configure(text=val)
+
+        # 2. Security flags
+        flags_map = {
+            "Debuggable": sec_flags.get("debuggable"),
+            "Allow Backup": sec_flags.get("allow_backup"),
+            "Cleartext Traffic": sec_flags.get("uses_cleartext_traffic"),
+            "Test Only": sec_flags.get("test_only"),
+        }
+        for flag_name, flag_val in flags_map.items():
+            badge = widgets["flags"].get(flag_name)
+            if not badge:
+                continue
+            is_bad = flag_val is True and flag_name in ["Debuggable", "Allow Backup", "Cleartext Traffic"]
+            badge_color = COLOR_DANGER if is_bad else COLOR_SURFACE_HOVER
+            badge_text = "TRUE" if flag_val else ("FALSE" if flag_val is False else "UNSPECIFIED")
+            badge.configure(text=f" {badge_text} ", fg_color=badge_color)
+
+        # 3. Permissions
+        perms = manifest.get("permissions", [])
+        widgets["perms_title"].configure(text=f"DECLARED PERMISSIONS ({len(perms)})")
+
+        perms_box = widgets["perms_box"]
+        perms_box.configure(state="normal")
+        perms_box.delete("1.0", "end")
+        if perms:
+            for p in perms:
+                perms_box.insert("end", f"• {p.get('name')}\n")
+        else:
+            perms_box.insert("end", "No permissions declared.")
+        perms_box.configure(state="disabled")
+
+        # 4. Components
+        comps = manifest.get("components", {})
+        for c_type, box in widgets["comp_boxes"].items():
+            box.configure(state="normal")
+            box.delete("1.0", "end")
+            c_list = comps.get(c_type, [])
             if c_list:
                 for item in c_list:
                     exp = " [EXPORTED]" if item.get("exported") else ""
@@ -786,7 +834,136 @@ class AndroidAnalyzerApp(ctk.CTk):
                 box.insert("end", f"No {c_type} found.")
             box.configure(state="disabled")
 
-        self.pages["Manifest"] = page
+    # ------------------------------------------------------------------ #
+    # Settings page (renamed from "API Settings"): manages the 4 shared
+    # tool paths AND the API section, both persisted through save_config_fn
+    # ------------------------------------------------------------------ #
+    def build_settings_page(self):
+        page = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        page.grid_columnconfigure(0, weight=1)
+        page.grid_rowconfigure(1, weight=1)
+
+        header_frame = ctk.CTkFrame(page, fg_color="transparent")
+        header_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=(30, 15))
+        ctk.CTkLabel(header_frame, text="⚙️ Settings", font=("Arial", 26, "bold"), text_color=COLOR_ACCENT_TEXT).pack(side="left")
+
+        body = ctk.CTkScrollableFrame(page, fg_color="transparent")
+        body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 30))
+
+        current_paths = self.config.get("paths", {}) or {}
+        current_api = self.config.get("api", {}) or {}
+
+        # --- Tool paths section ---
+        paths_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
+        paths_card.pack(fill="x", pady=(0, 15), padx=5)
+        ctk.CTkLabel(paths_card, text="TOOL PATHS", font=("Arial", 12, "bold"), text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=20, pady=(15, 10))
+
+        path_fields = [
+            ("output_dir", "Output Directory", "dir"),
+            ("apktool_path", "Apktool Path (.jar / executable)", "file"),
+            ("jadx_path", "Jadx Path (executable / bat)", "file"),
+            ("ghidra_path", "Ghidra Path (script / executable)", "file"),
+        ]
+
+        self.settings_path_entries = {}
+        for key, label, kind in path_fields:
+            row = ctk.CTkFrame(paths_card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=6)
+
+            ctk.CTkLabel(row, text=label, font=("Arial", 13), text_color=COLOR_TEXT, width=210, anchor="w").pack(side="left")
+
+            entry = ctk.CTkEntry(row, fg_color=COLOR_SURFACE_HOVER, border_width=0, height=35)
+            entry.pack(side="left", fill="x", expand=True, padx=(10, 10))
+            entry.insert(0, current_paths.get(key, "") or "")
+
+            ctk.CTkButton(
+                row,
+                text="Browse",
+                width=90,
+                height=35,
+                fg_color=COLOR_SURFACE_HOVER,
+                hover_color="#3D3E4A",
+                command=lambda e=entry, k=kind: self._browse_path(e, k),
+            ).pack(side="left")
+
+            self.settings_path_entries[key] = entry
+
+        paths_card_spacer = ctk.CTkFrame(paths_card, fg_color="transparent", height=5)
+        paths_card_spacer.pack(fill="x")
+
+        # --- AI API section ---
+        api_card = ctk.CTkFrame(body, fg_color=COLOR_SURFACE, corner_radius=10, border_width=1, border_color=COLOR_BORDER)
+        api_card.pack(fill="x", pady=(0, 15), padx=5)
+        ctk.CTkLabel(api_card, text="AI API SETTINGS", font=("Arial", 12, "bold"), text_color=COLOR_TEXT_MUTED).pack(anchor="w", padx=20, pady=(15, 10))
+
+        api_fields = [
+            ("provider", "Provider (e.g. openai, anthropic)", ""),
+            ("model", "Model Name", ""),
+            ("api_key", "API Key", "•"),
+        ]
+
+        self.settings_api_entries = {}
+        for key, label, show_char in api_fields:
+            row = ctk.CTkFrame(api_card, fg_color="transparent")
+            row.pack(fill="x", padx=20, pady=6)
+
+            ctk.CTkLabel(row, text=label, font=("Arial", 13), text_color=COLOR_TEXT, width=210, anchor="w").pack(side="left")
+
+            entry = ctk.CTkEntry(row, fg_color=COLOR_SURFACE_HOVER, border_width=0, height=35, show=show_char)
+            entry.pack(side="left", fill="x", expand=True, padx=(10, 10))
+            entry.insert(0, current_api.get(key, "") or "")
+
+            self.settings_api_entries[key] = entry
+
+        api_card_spacer = ctk.CTkFrame(api_card, fg_color="transparent", height=5)
+        api_card_spacer.pack(fill="x", pady=(0, 10))
+
+        # --- Save button + status ---
+        save_row = ctk.CTkFrame(body, fg_color="transparent")
+        save_row.pack(fill="x", pady=(5, 20), padx=5)
+
+        self.settings_status_lbl = ctk.CTkLabel(save_row, text="", font=("Arial", 12), text_color=COLOR_TEXT_MUTED)
+        self.settings_status_lbl.pack(side="left")
+
+        ctk.CTkButton(
+            save_row,
+            text="💾 Save Settings",
+            height=40,
+            width=160,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_ACCENT_HOVER,
+            command=self.save_settings,
+        ).pack(side="right")
+
+        return page
+
+    def _browse_path(self, entry_widget: ctk.CTkEntry, kind: str):
+        path = (
+            filedialog.askdirectory(title="Select Directory")
+            if kind == "dir"
+            else filedialog.askopenfilename(title="Select File")
+        )
+        if path:
+            entry_widget.delete(0, "end")
+            entry_widget.insert(0, path)
+
+    def save_settings(self):
+        new_paths = {key: entry.get().strip() for key, entry in self.settings_path_entries.items()}
+        new_api = {key: entry.get().strip() for key, entry in self.settings_api_entries.items()}
+        updated_config = {"paths": new_paths, "api": new_api}
+
+        if self.save_config_fn is None:
+            self.settings_status_lbl.configure(text="⚠️ Save handler not available.", text_color=COLOR_DANGER)
+            return
+
+        try:
+            self.save_config_fn(updated_config)
+        except Exception as exc:  # noqa: BLE001
+            self.settings_status_lbl.configure(text=f"❌ Failed to save: {exc}", text_color=COLOR_DANGER)
+            return
+
+        self.config = updated_config
+        self.settings_status_lbl.configure(text="✅ Settings saved.", text_color=COLOR_SUCCESS)
 
     def build_chat_page(self):
         page = ctk.CTkFrame(self.main_container, fg_color="transparent")
