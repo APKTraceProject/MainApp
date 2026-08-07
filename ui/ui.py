@@ -597,6 +597,11 @@ class AndroidAnalyzerApp(ctk.CTk):
             print(f"[ERROR] Analysis failed: {error_msg}")
             return
 
+        if not isinstance(report, dict):
+            self.progress_status_lbl.configure(text="❌ Error: analyzer returned no usable data.")
+            print(f"[ERROR] Analysis returned an unexpected report type: {type(report)!r}")
+            return
+
         self.analysis_results = report
         self.update_dashboard_cards(report)
         self.update_manifest_page(report)
