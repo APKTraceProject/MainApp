@@ -1,2 +1,4 @@
 README.md
 ui/__pycache__/
+ui/tabs/__pycache__/
+ui/tree.py
