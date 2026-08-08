@@ -243,11 +243,13 @@ from .tabs import (
     browse_path,
     build_chat_page,
     build_dashboard,
+    build_jadx_analyzer_page,
     build_manifest_page,
     build_placeholder_page,
     build_settings_page,
     save_settings,
     update_dashboard_cards,
+    update_jadx_analyzer_page,
     update_manifest_page,
 )
 
@@ -279,6 +281,7 @@ class AndroidAnalyzerApp(ctk.CTk):
         self.scan_mode_btns = {}
         self.dashboard_cards = {}
         self.manifest_widgets = {}
+        self.jadx_widgets = {}
         self.settings_path_entries = {}
         self.settings_api_entries = {}
 
@@ -420,9 +423,7 @@ class AndroidAnalyzerApp(ctk.CTk):
 
         # Scan result pages
         self.pages["Manifest"] = self.build_manifest_page()
-        self.pages["Java / Kotlin"] = self.build_placeholder_page(
-            "Java / Kotlin Analysis Results"
-        )
+        self.pages["Java / Kotlin"] = self.build_jadx_analyzer_page()
         self.pages["Native Libraries"] = self.build_placeholder_page(
             "Native Libraries Analysis Results"
         )
@@ -499,8 +500,72 @@ class AndroidAnalyzerApp(ctk.CTk):
             threading.Thread(
                 target=self._run_manifest_analysis_thread, daemon=True
             ).start()
+        elif self.current_scan_mode == "Java / Kotlin":
+            self.toggle_ui_interactivity(False)
+            self.progress_frame.pack(
+                fill="x",
+                padx=30,
+                pady=(10, 15),
+                before=self.mode_indicator_lbl.master,
+            )
+            self.progress_bar.set(0.05)
+            self.progress_status_lbl.configure(
+                text="⚙️ Initializing analysis engine..."
+            )
+
+            threading.Thread(
+                target=self._run_java_analysis_thread, daemon=True
+            ).start()
         else:
             print(f"[*] Scan mode '{self.current_scan_mode}' is not yet connected.")
+
+    def _run_java_analysis_thread(self):
+        """Run the JADX -> LLM pipeline (Java/Kotlin scan mode)."""
+        try:
+            if self.run_java_analysis_fn is None:
+                raise RuntimeError(
+                    "Java/Kotlin analysis is not connected. Launch APKTrace via main.py so "
+                    "the JADX Analyzer and the LLM analysis step get wired in."
+                )
+
+            report = self.run_java_analysis_fn(
+                apk_path_str=self.loaded_apk_path,
+                config=self.config,
+                status_callback=self._update_progress_callback,
+            )
+
+            self.after(0, lambda: self._on_java_analysis_finished(report, None))
+        except Exception as e:
+            self.after(0, lambda: self._on_java_analysis_finished(None, str(e)))
+
+    def _on_java_analysis_finished(self, report, error_msg):
+        """Completion callback for the Java/Kotlin (JADX + LLM) scan mode.
+
+        This is where the LLM's structured analysis JSON is handed to the
+        JADX Analyzer tab.
+        """
+        self.toggle_ui_interactivity(True)
+        self.progress_frame.pack_forget()
+
+        if error_msg:
+            self.progress_status_lbl.configure(text=f"❌ Error: {error_msg}")
+            print(f"[ERROR] Java/Kotlin analysis failed: {error_msg}")
+            return
+
+        if not isinstance(report, dict):
+            self.progress_status_lbl.configure(
+                text="❌ Error: analyzer returned no usable data."
+            )
+            print(
+                f"[ERROR] Java/Kotlin analysis returned an unexpected report type: {type(report)!r}"
+            )
+            return
+
+        # <-- The JADX/LLM result is passed to the tab here.
+        self.update_jadx_analyzer_page(report)
+
+        # Show JADX Analyzer scan result page after completion
+        self.show_page("Java / Kotlin")
 
     def _update_progress_callback(self, status_text: str, value: float):
         self.after(0, lambda: self._apply_progress_update(status_text, value))
@@ -563,6 +628,16 @@ class AndroidAnalyzerApp(ctk.CTk):
 
     def update_manifest_page(self, report: dict):
         return update_manifest_page(self, report)
+
+    def build_jadx_analyzer_page(self):
+        return build_jadx_analyzer_page(self)
+
+    def update_jadx_analyzer_page(self, report: dict):
+        """Rebuild the JADX Analyzer tab from the LLM's structured analysis
+        JSON. Call this once the Java/Kotlin analysis pipeline (JADX ->
+        LLM) has produced its result dict, e.g. from a completion callback
+        such as `_on_java_analysis_finished` below."""
+        return update_jadx_analyzer_page(self, report)
 
     def build_settings_page(self):
         return build_settings_page(self)
