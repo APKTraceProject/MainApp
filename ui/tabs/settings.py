@@ -1,6 +1,8 @@
 import tkinter.filedialog as filedialog
 import customtkinter as ctk
 
+from core.config import NATIVE_ENGINE_OPTIONS
+
 from ..ui import (
     COLOR_ACCENT,
     COLOR_ACCENT_HOVER,
@@ -13,6 +15,13 @@ from ..ui import (
     COLOR_TEXT,
     COLOR_TEXT_MUTED,
 )
+
+
+def native_engine_hint(engine: str) -> str:
+    """Helper text describing the path expected for the selected engine."""
+    if (engine or "").strip().lower() == "radare2":
+        return "Path to the Radare2 executable (r2 or r2.exe)."
+    return "Path to the Ghidra headless analyzer script or executable (e.g. analyzeHeadless.bat)."
 
 
 def build_settings_page(app):
@@ -39,11 +48,14 @@ def build_settings_page(app):
         ("output_dir", "Output Directory", "dir"),
         ("apktool_path", "Apktool Path (.jar / executable)", "file"),
         ("jadx_path", "Jadx Path (executable / bat)", "file"),
-        ("ghidra_path", "Ghidra Path (script / executable)", "file"),
+        ("native_engine_path", "Native Engine Path", "file"),
     ]
 
     app.settings_path_entries = {}
     for key, label, kind in path_fields:
+        if key == "native_engine_path":
+            _build_engine_selector(app, paths_card, current_paths)
+
         row = ctk.CTkFrame(paths_card, fg_color="transparent")
         row.pack(fill="x", padx=20, pady=6)
 
@@ -64,6 +76,15 @@ def build_settings_page(app):
         ).pack(side="left")
 
         app.settings_path_entries[key] = entry
+
+        if key == "native_engine_path":
+            app.settings_engine_hint_lbl = ctk.CTkLabel(
+                paths_card,
+                text=native_engine_hint(app.settings_engine_combo.get()),
+                font=("Arial", 11),
+                text_color=COLOR_TEXT_MUTED,
+            )
+            app.settings_engine_hint_lbl.pack(anchor="w", padx=20, pady=(0, 4))
 
     paths_card_spacer = ctk.CTkFrame(paths_card, fg_color="transparent", height=5)
     paths_card_spacer.pack(fill="x")
@@ -115,6 +136,45 @@ def build_settings_page(app):
     return page
 
 
+def _build_engine_selector(app, paths_card, current_paths):
+    engine_row = ctk.CTkFrame(paths_card, fg_color="transparent")
+    engine_row.pack(fill="x", padx=20, pady=6)
+
+    ctk.CTkLabel(
+        engine_row,
+        text="Native Analysis Engine",
+        font=("Arial", 13),
+        text_color=COLOR_TEXT,
+        width=210,
+        anchor="w",
+    ).pack(side="left")
+
+    current = str(current_paths.get("native_engine", "ghidra") or "ghidra").strip().lower()
+    if current not in NATIVE_ENGINE_OPTIONS:
+        current = "ghidra"
+
+    app.settings_engine_combo = ctk.CTkComboBox(
+        engine_row,
+        values=NATIVE_ENGINE_OPTIONS,
+        state="readonly",
+        height=35,
+        fg_color=COLOR_SURFACE_HOVER,
+        border_width=0,
+        dropdown_fg_color=COLOR_SURFACE_HOVER,
+        dropdown_hover_color=COLOR_ACCENT,
+        command=lambda _choice: _update_engine_hint(app),
+    )
+    app.settings_engine_combo.set(current)
+    app.settings_engine_combo.pack(side="left", fill="x", expand=True, padx=(10, 10))
+
+
+def _update_engine_hint(app):
+    if getattr(app, "settings_engine_hint_lbl", None) is not None:
+        app.settings_engine_hint_lbl.configure(
+            text=native_engine_hint(app.settings_engine_combo.get())
+        )
+
+
 def browse_path(entry_widget: ctk.CTkEntry, kind: str):
     path = (
         filedialog.askdirectory(title="Select Directory")
@@ -128,6 +188,7 @@ def browse_path(entry_widget: ctk.CTkEntry, kind: str):
 
 def save_settings(app):
     new_paths = {key: entry.get().strip() for key, entry in app.settings_path_entries.items()}
+    new_paths["native_engine"] = app.settings_engine_combo.get().strip().lower()
     new_api = {key: entry.get().strip() for key, entry in app.settings_api_entries.items()}
     updated_config = {"paths": new_paths, "api": new_api}
 

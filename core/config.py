@@ -29,10 +29,15 @@ from typing import Any, Dict, List
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
-# The 4 paths collected by the setup wizard. jadx_path/ghidra_path are kept
-# here so the wizard/settings screen still ask for them up front, even
-# though they aren't used by any code yet.
-REQUIRED_PATH_KEYS = ["output_dir", "apktool_path", "jadx_path", "ghidra_path"]
+# Decompiler/analyzer engines selectable for native library analysis.
+NATIVE_ENGINE_OPTIONS = ["ghidra", "radare2"]
+
+# The paths collected by the setup wizard. `native_engine_path` points at
+# whichever engine was selected via `native_engine` (Ghidra headless script
+# or the Radare2 executable). jadx_path/native_engine_path are kept here so
+# the wizard/settings screen still ask for them up front, even though they
+# aren't used by the main UI code yet.
+REQUIRED_PATH_KEYS = ["output_dir", "apktool_path", "jadx_path", "native_engine_path"]
 
 # Optional AI API fields stored alongside the tool paths. They may stay
 # empty; they are validated for correct *type* but never required.
@@ -43,7 +48,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "output_dir": "",
         "apktool_path": "",
         "jadx_path": "",
-        "ghidra_path": "",
+        "native_engine": "ghidra",
+        "native_engine_path": "",
     },
     "api": {
         "provider": "",
@@ -90,7 +96,15 @@ def load_config() -> Dict[str, Any]:
                 paths = data.get("paths") or {}
                 api = data.get("api") or {}
                 if isinstance(paths, dict):
-                    config["paths"].update(paths)
+                    migrated_paths = dict(paths)
+                    # Backwards compat: configs written with the old
+                    # `ghidra_path` key are migrated to `native_engine_path`.
+                    if not migrated_paths.get("native_engine_path") and migrated_paths.get("ghidra_path"):
+                        migrated_paths["native_engine_path"] = migrated_paths["ghidra_path"]
+                    engine = str(migrated_paths.get("native_engine", "") or "").strip().lower()
+                    if engine not in NATIVE_ENGINE_OPTIONS:
+                        migrated_paths["native_engine"] = "ghidra"
+                    config["paths"].update(migrated_paths)
                 if isinstance(api, dict):
                     config["api"].update(api)
         except (json.JSONDecodeError, OSError) as exc:
@@ -129,6 +143,12 @@ def validate_config(config: Dict[str, Any]) -> List[str]:
             problems.append(f"paths.{key} is missing or empty")
         elif key != "output_dir" and not Path(value).expanduser().exists():
             problems.append(f"paths.{key} does not point to an existing file: {value!r}")
+
+    engine = paths.get("native_engine")
+    if not isinstance(engine, str) or engine.strip().lower() not in NATIVE_ENGINE_OPTIONS:
+        problems.append(
+            f"paths.native_engine must be one of: {', '.join(NATIVE_ENGINE_OPTIONS)}"
+        )
 
     api = config.get("api")
     if api is not None and not isinstance(api, dict):

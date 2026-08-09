@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, Optional
 import tkinter.filedialog as filedialog
 import customtkinter as ctk
 
-from core.config import API_KEYS, save_config as default_save_config
+from core.config import API_KEYS, NATIVE_ENGINE_OPTIONS, save_config as default_save_config
 
 from .ui import (
     COLOR_ACCENT,
@@ -34,6 +34,13 @@ from .ui import (
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+
+def native_engine_hint(engine: str) -> str:
+    """Helper text describing the path expected for the selected engine."""
+    if (engine or "").strip().lower() == "radare2":
+        return "Path to the Radare2 executable (r2 or r2.exe)."
+    return "Path to the Ghidra headless analyzer script or executable (e.g. analyzeHeadless.bat)."
 
 
 class SetupWizard(ctk.CTk):
@@ -60,10 +67,10 @@ class SetupWizard(ctk.CTk):
             "Path to the jadx or jadx.bat executable.",
         ),
         (
-            "ghidra_path",
-            "Ghidra Path (script/executable)",
+            "native_engine_path",
+            "Native Engine Path",
             "file",
-            "Path to the Ghidra headless analyzer script or executable.",
+            native_engine_hint("ghidra"),
         ),
     ]
 
@@ -106,15 +113,29 @@ class SetupWizard(ctk.CTk):
         body.grid(row=1, column=0, sticky="nsew", padx=30, pady=(0, 10))
 
         existing_paths = self.config_data.get("paths", {}) or {}
+        self._native_engine_hint_lbl: Optional[ctk.CTkLabel] = None
 
         for key, label, kind, hint in self.FIELDS:
+            if key == "native_engine_path":
+                self._build_engine_selector(body, existing_paths)
+
             field_frame = ctk.CTkFrame(body, fg_color="transparent")
             field_frame.pack(fill="x", padx=20, pady=(15, 5))
 
             ctk.CTkLabel(field_frame, text=label, font=("Arial", 14, "bold"), text_color=COLOR_TEXT).pack(anchor="w")
-            ctk.CTkLabel(field_frame, text=hint, font=("Arial", 11), text_color=COLOR_TEXT_MUTED).pack(
-                anchor="w", pady=(0, 6)
-            )
+
+            if key == "native_engine_path":
+                self._native_engine_hint_lbl = ctk.CTkLabel(
+                    field_frame,
+                    text=native_engine_hint(self.engine_combo.get()),
+                    font=("Arial", 11),
+                    text_color=COLOR_TEXT_MUTED,
+                )
+                self._native_engine_hint_lbl.pack(anchor="w", pady=(0, 6))
+            else:
+                ctk.CTkLabel(field_frame, text=hint, font=("Arial", 11), text_color=COLOR_TEXT_MUTED).pack(
+                    anchor="w", pady=(0, 6)
+                )
 
             input_row = ctk.CTkFrame(field_frame, fg_color="transparent")
             input_row.pack(fill="x")
@@ -153,6 +174,45 @@ class SetupWizard(ctk.CTk):
         ).pack(side="right")
 
     # ------------------------------------------------------------------ #
+    def _build_engine_selector(self, body: ctk.CTkScrollableFrame, existing_paths: Dict[str, Any]):
+        engine_frame = ctk.CTkFrame(body, fg_color="transparent")
+        engine_frame.pack(fill="x", padx=20, pady=(15, 5))
+
+        ctk.CTkLabel(
+            engine_frame, text="Native Analysis Engine", font=("Arial", 14, "bold"), text_color=COLOR_TEXT
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            engine_frame,
+            text="Choose the engine used to analyze native libraries (Ghidra or Radare2).",
+            font=("Arial", 11),
+            text_color=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(0, 6))
+
+        current = str(existing_paths.get("native_engine", "ghidra") or "ghidra").strip().lower()
+        if current not in NATIVE_ENGINE_OPTIONS:
+            current = "ghidra"
+
+        self.engine_combo = ctk.CTkComboBox(
+            engine_frame,
+            values=NATIVE_ENGINE_OPTIONS,
+            state="readonly",
+            height=38,
+            fg_color=COLOR_SURFACE_HOVER,
+            border_width=0,
+            dropdown_fg_color=COLOR_SURFACE_HOVER,
+            dropdown_hover_color=COLOR_ACCENT,
+            command=lambda _choice: self._update_native_engine_hint(),
+        )
+        self.engine_combo.set(current)
+        self.engine_combo.pack(fill="x")
+
+    def _update_native_engine_hint(self):
+        if self._native_engine_hint_lbl is not None:
+            self._native_engine_hint_lbl.configure(
+                text=native_engine_hint(self.engine_combo.get())
+            )
+
+    # ------------------------------------------------------------------ #
     def _browse(self, entry_widget: ctk.CTkEntry, kind: str):
         path = (
             filedialog.askdirectory(title="Select Directory")
@@ -165,6 +225,10 @@ class SetupWizard(ctk.CTk):
 
     def _on_save(self):
         values = {key: entry.get().strip() for key, entry in self.entries.items()}
+        values["native_engine"] = self.engine_combo.get().strip().lower()
+        if values["native_engine"] not in NATIVE_ENGINE_OPTIONS:
+            self.status_lbl.configure(text="❌ 'Native Analysis Engine' is invalid.")
+            return
 
         for key, label, kind, _hint in self.FIELDS:
             value = values.get(key, "")
