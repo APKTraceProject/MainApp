@@ -2,9 +2,20 @@
 core/config.py
 
 Responsible for everything related to the application's config.json:
-defaults, the location of the file, loading, merging, saving, and the
-"is setup complete?" check used to decide whether the first-run wizard
-must be shown.
+existence checks, defaults, loading, validation, merging, saving, and the
+"is setup complete?" check used to decide whether the setup wizard must be
+shown at startup.
+
+Startup flow (driven by `core.launcher.launch_app`, logic lives here):
+
+    1. config.json is missing      -> `ensure_config_exists()` creates a
+       default one, then the wizard is shown.
+    2. config.json exists          -> `load_config()` parses it and
+       `validate_config()` checks required keys, missing fields and values.
+    3. invalid / incomplete        -> the wizard is shown so the user can
+       fix or populate the config.
+    4. valid                       -> config is used and the wizard is
+       skipped.
 
 The UI never touches config.json directly - it only calls the functions
 injected by `core.launcher.launch_app`.
@@ -13,7 +24,7 @@ injected by `core.launcher.launch_app`.
 import copy
 import json
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = BASE_DIR / "config.json"
@@ -22,6 +33,10 @@ CONFIG_PATH = BASE_DIR / "config.json"
 # here so the wizard/settings screen still ask for them up front, even
 # though they aren't used by any code yet.
 REQUIRED_PATH_KEYS = ["output_dir", "apktool_path", "jadx_path", "ghidra_path"]
+
+# Optional AI API fields stored alongside the tool paths. They may stay
+# empty; they are validated for correct *type* but never required.
+API_KEYS = ["provider", "api_key", "model"]
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "paths": {
@@ -46,18 +61,38 @@ def merge_config(config: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, A
     return merged
 
 
+def ensure_config_exists() -> None:
+    """Create config.json with the default structure if it does not exist yet.
+
+    A freshly created file is incomplete (all paths empty) on purpose: the
+    startup flow then routes the user to the setup wizard to fill it in.
+    """
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        save_config({})
+        print(f"[*] No config.json found - created a fresh one at {CONFIG_PATH}.")
+
+
 def load_config() -> Dict[str, Any]:
     """Read config.json into memory, filling any missing keys with defaults.
 
-    A missing, corrupt, or unreadable file never raises: the defaults are
-    returned instead, so callers can always treat the result as valid.
+    A missing, corrupt, unreadable, or structurally wrong file never raises:
+    valid keys are kept and the defaults are used for the rest, so callers
+    can always treat the result as a dict shaped like DEFAULT_CONFIG. Whether
+    the loaded values are actually *usable* is answered by `validate_config`.
     """
     config = copy.deepcopy(DEFAULT_CONFIG)
     if CONFIG_PATH.exists():
         try:
             with CONFIG_PATH.open("r", encoding="utf-8") as file:
                 data = json.load(file) or {}
-            config = merge_config(config, data)
+            if isinstance(data, dict):
+                paths = data.get("paths") or {}
+                api = data.get("api") or {}
+                if isinstance(paths, dict):
+                    config["paths"].update(paths)
+                if isinstance(api, dict):
+                    config["api"].update(api)
         except (json.JSONDecodeError, OSError) as exc:
             print(f"[WARN] Could not read config.json ({exc}); falling back to defaults.")
     return config
@@ -71,17 +106,53 @@ def save_config(config: Dict[str, Any]) -> None:
         json.dump(merged, file, indent=4, ensure_ascii=False)
 
 
-def is_setup_complete(config: Dict[str, Any]) -> bool:
-    """Return True only when all 4 required paths are present and valid.
+def validate_config(config: Dict[str, Any]) -> List[str]:
+    """Return a list of human-readable problems, or [] when config is usable.
 
-    `output_dir` may point at a directory that does not exist yet (it is
-    created on demand); every other path must point to an existing file.
+    Checks structure (root/sections must be objects), required fields (the
+    4 tool paths must be non-empty strings), and values (non-output paths
+    must exist on disk; API fields, when present, must be strings). API
+    fields are never *required* - they may be left empty.
     """
-    paths = config.get("paths", {})
+    if not isinstance(config, dict):
+        return ["config root is not an object"]
+
+    problems: List[str] = []
+
+    paths = config.get("paths")
+    if not isinstance(paths, dict):
+        return ["'paths' section is missing or not an object"]
+
     for key in REQUIRED_PATH_KEYS:
-        value = (paths.get(key) or "").strip()
-        if not value:
-            return False
-        if key != "output_dir" and not Path(value).expanduser().exists():
-            return False
-    return True
+        value = paths.get(key)
+        if not isinstance(value, str) or not value.strip():
+            problems.append(f"paths.{key} is missing or empty")
+        elif key != "output_dir" and not Path(value).expanduser().exists():
+            problems.append(f"paths.{key} does not point to an existing file: {value!r}")
+
+    api = config.get("api")
+    if api is not None and not isinstance(api, dict):
+        problems.append("'api' section must be an object")
+    elif isinstance(api, dict):
+        for key in API_KEYS:
+            value = api.get(key)
+            if value is not None and not isinstance(value, str):
+                problems.append(f"api.{key} must be a string")
+
+    return problems
+
+
+def is_valid_config(config: Dict[str, Any]) -> bool:
+    """Return True when `validate_config` finds no problems."""
+    return not validate_config(config)
+
+
+def is_setup_complete(config: Dict[str, Any]) -> bool:
+    """Return True only when the config is valid and fully populated.
+
+    Equivalent to `is_valid_config`; kept as a public alias for clarity at
+    the startup gate. `output_dir` may point at a directory that does not
+    exist yet (it is created on demand); every other path must point to an
+    existing file.
+    """
+    return is_valid_config(config)

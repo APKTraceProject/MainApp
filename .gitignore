@@ -2,3 +2,6 @@ README.md
 __pycache__
 ui/tree.py
 .vscode
+
+# Local machine configuration - contains user-specific tool paths and API keys.
+config.json

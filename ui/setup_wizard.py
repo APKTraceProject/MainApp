@@ -1,11 +1,14 @@
 """
 mainapp/ui/setup_wizard.py
 
-First-run configuration window. Shown by main.py BEFORE the main
-AndroidAnalyzerApp window when one or more of the 4 required paths are
-missing from config.json. Collects them, hands the finished config back
-to main.py's save_config() through the on_complete callback, then closes
-itself so main.py can open the real UI.
+Configuration window shown by the startup flow (core.launcher.launch_app)
+whenever config.json is missing, invalid, or incomplete. Collects the
+required tool paths, writes the validated configuration to config.json,
+and then closes itself so the app can open the real UI.
+
+The config is written through `on_complete` (normally core.config.save_config).
+If no callback is supplied the wizard falls back to that same writer, so
+completing the wizard always persists a valid config.json.
 """
 
 from pathlib import Path
@@ -13,6 +16,8 @@ from typing import Any, Callable, Dict, Optional
 
 import tkinter.filedialog as filedialog
 import customtkinter as ctk
+
+from core.config import API_KEYS, save_config as default_save_config
 
 from .ui import (
     COLOR_ACCENT,
@@ -70,7 +75,9 @@ class SetupWizard(ctk.CTk):
         self.minsize(680, 540)
 
         self.config_data: Dict[str, Any] = config or {"paths": {}, "api": {}}
-        self.on_complete = on_complete
+        self.on_complete = (
+            on_complete if on_complete is not None else default_save_config
+        )
         self.entries: Dict[str, ctk.CTkEntry] = {}
         self.completed = False
 
@@ -168,9 +175,16 @@ class SetupWizard(ctk.CTk):
                 self.status_lbl.configure(text=f"❌ '{label}' does not point to an existing file.")
                 return
 
-        updated_config: Dict[str, Any] = dict(self.config_data)
-        updated_config["paths"] = values
-        updated_config.setdefault("api", {"provider": "", "api_key": "", "model": ""})
+        # Build a structurally valid config: the collected paths plus the
+        # existing API settings normalized to strings (empty when absent).
+        # This guarantees `save_config` always persists a valid config.json.
+        raw_api = self.config_data.get("api") or {}
+        if not isinstance(raw_api, dict):
+            raw_api = {}
+        updated_config: Dict[str, Any] = {
+            "paths": values,
+            "api": {key: str(raw_api.get(key, "") or "") for key in API_KEYS},
+        }
 
         if self.on_complete is not None:
             try:
