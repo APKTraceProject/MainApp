@@ -17,7 +17,7 @@ glues the pieces together, implementing the startup verification flow:
 
 from typing import Any, Dict
 
-from .analyzers import run_manifest_analysis
+from .analyzers import run_manifest_analysis, run_native_analysis
 from .config import ensure_config_exists, load_config, save_config, validate_config
 
 
@@ -52,6 +52,7 @@ def launch_app() -> None:
     app = AndroidAnalyzerApp(
         config=config,
         run_manifest_analysis=run_manifest_analysis,
+        run_native_analysis=run_native_analysis,
         save_config=save_config,
     )
     app.mainloop()

@@ -57,6 +57,10 @@ def load_tool_module(tool_name: str) -> ModuleType:
     if not script_path.exists():
         raise RuntimeError(f"Tool script not found at: {script_path}")
 
+    tool_dir = str(script_path.parent)
+    if tool_dir not in sys.path:
+        sys.path.insert(0, tool_dir)
+
     spec = importlib.util.spec_from_file_location(f"apktrace_{tool_name}_tool", script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not create an import spec for: {script_path}")

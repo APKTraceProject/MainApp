@@ -5,6 +5,7 @@ from .manifest import build_manifest_page, update_manifest_page
 from .placeholder import build_placeholder_page
 from .permissions_tab import PermissionsTab
 from .jadx_analyzer import build_jadx_analyzer_page, update_jadx_analyzer_page
+from .native_analyzer import build_native_analyzer_page, update_native_analyzer_page
 
 __all__ = [
     "build_dashboard",
@@ -19,4 +20,6 @@ __all__ = [
     "build_placeholder_page",
     "build_jadx_analyzer_page",
     "update_jadx_analyzer_page",
+    "build_native_analyzer_page",
+    "update_native_analyzer_page",
 ]

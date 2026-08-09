@@ -245,12 +245,14 @@ from .tabs import (
     build_dashboard,
     build_jadx_analyzer_page,
     build_manifest_page,
+    build_native_analyzer_page,
     build_placeholder_page,
     build_settings_page,
     save_settings,
     update_dashboard_cards,
     update_jadx_analyzer_page,
     update_manifest_page,
+    update_native_analyzer_page,
 )
 
 
@@ -424,9 +426,7 @@ class AndroidAnalyzerApp(ctk.CTk):
         # Scan result pages
         self.pages["Manifest"] = self.build_manifest_page()
         self.pages["Java / Kotlin"] = self.build_jadx_analyzer_page()
-        self.pages["Native Libraries"] = self.build_placeholder_page(
-            "Native Libraries Analysis Results"
-        )
+        self.pages["Native Libraries"] = self.build_native_analyzer_page()
         self.pages["Strings"] = self.build_placeholder_page(
             "Strings & Secrets Results"
         )
@@ -516,6 +516,22 @@ class AndroidAnalyzerApp(ctk.CTk):
             threading.Thread(
                 target=self._run_java_analysis_thread, daemon=True
             ).start()
+        elif self.current_scan_mode == "Native Libraries":
+            self.toggle_ui_interactivity(False)
+            self.progress_frame.pack(
+                fill="x",
+                padx=30,
+                pady=(10, 15),
+                before=self.mode_indicator_lbl.master,
+            )
+            self.progress_bar.set(0.05)
+            self.progress_status_lbl.configure(
+                text="⚙️ Initializing native analysis engine..."
+            )
+
+            threading.Thread(
+                target=self._run_native_analysis_thread, daemon=True
+            ).start()
         else:
             print(f"[*] Scan mode '{self.current_scan_mode}' is not yet connected.")
 
@@ -566,6 +582,48 @@ class AndroidAnalyzerApp(ctk.CTk):
 
         # Show JADX Analyzer scan result page after completion
         self.show_page("Java / Kotlin")
+
+    def _run_native_analysis_thread(self):
+        """Run the Native Analyzer pipeline (Native Libraries scan mode)."""
+        try:
+            if self.run_native_analysis_fn is None:
+                raise RuntimeError(
+                    "Native analysis is not connected. Launch APKTrace via main.py so "
+                    "the Native Analyzer gets wired in."
+                )
+
+            report = self.run_native_analysis_fn(
+                apk_path_str=self.loaded_apk_path,
+                config=self.config,
+                status_callback=self._update_progress_callback,
+            )
+
+            self.after(0, lambda: self._on_native_analysis_finished(report, None))
+        except Exception as e:
+            self.after(0, lambda: self._on_native_analysis_finished(None, str(e)))
+
+    def _on_native_analysis_finished(self, report, error_msg):
+        """Completion callback for Native Libraries scan mode."""
+        self.toggle_ui_interactivity(True)
+        self.progress_frame.pack_forget()
+
+        if error_msg:
+            self.progress_status_lbl.configure(text=f"❌ Error: {error_msg}")
+            print(f"[ERROR] Native analysis failed: {error_msg}")
+            return
+
+        if not isinstance(report, dict):
+            self.progress_status_lbl.configure(
+                text="❌ Error: analyzer returned no usable data."
+            )
+            print(
+                f"[ERROR] Native analysis returned an unexpected report type: {type(report)!r}"
+            )
+            return
+
+        self.native_analysis_results = report
+        self.update_native_analyzer_page(report)
+        self.show_page("Native Libraries")
 
     def _update_progress_callback(self, status_text: str, value: float):
         self.after(0, lambda: self._apply_progress_update(status_text, value))
@@ -638,6 +696,13 @@ class AndroidAnalyzerApp(ctk.CTk):
         LLM) has produced its result dict, e.g. from a completion callback
         such as `_on_java_analysis_finished` below."""
         return update_jadx_analyzer_page(self, report)
+
+    def build_native_analyzer_page(self):
+        return build_native_analyzer_page(self)
+
+    def update_native_analyzer_page(self, report: dict):
+        """Rebuild the Native Analyzer tab from the Ghidra/Radare2 structured report."""
+        return update_native_analyzer_page(self, report)
 
     def build_settings_page(self):
         return build_settings_page(self)
