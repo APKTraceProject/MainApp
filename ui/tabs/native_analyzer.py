@@ -143,10 +143,10 @@ def normalize_native_report(report: Any) -> Dict[str, Any]:
     raw_sev = raw_summary.get("by_severity") if isinstance(raw_summary.get("by_severity"), dict) else {}
 
     by_severity = {
-        "CRITICAL": int(raw_sev.get("CRITICAL", 0)),
-        "HIGH": int(raw_sev.get("HIGH", 0)),
-        "MEDIUM": int(raw_sev.get("MEDIUM", 0)),
-        "LOW": int(raw_sev.get("LOW", 0)),
+        "CRITICAL": 0,
+        "HIGH": 0,
+        "MEDIUM": 0,
+        "LOW": 0,
     }
 
     # Count findings dynamically if missing from raw summary
@@ -274,6 +274,11 @@ def normalize_native_report(report: Any) -> Dict[str, Any]:
             },
             "functions": functions_normalized,
         })
+
+    if total_findings_count == 0 and raw_sev:
+        for k in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+            by_severity[k] = int(raw_sev.get(k, 0))
+        total_findings_count = sum(by_severity.values())
 
     summary = {
         "analysis_engine": str(raw_summary.get("analysis_engine") or "GHIDRA / RADARE2"),
